@@ -60,6 +60,9 @@ server = [
     "python-dotenv>=1.0.0",
     "docker>=6.1.0",
     "tldextract>=5.0.0",
+    # GitHub integration
+    "PyGithub>=2.1.1",
+    "GitPython>=3.1.40",
     # Logging
     "logfire>=0.30.0",
     # Testing (needed for UI-triggered tests)
@@ -119,6 +122,9 @@ all = [
     "docker>=6.1.0",
     "tldextract>=5.0.0",
     "logfire>=0.30.0",
+    # GitHub integration
+    "PyGithub>=2.1.1",
+    "GitPython>=3.1.40",
     # MCP specific (mcp version)
     "mcp==1.12.2",
     # Agents specific

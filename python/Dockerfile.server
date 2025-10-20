@@ -22,7 +22,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install runtime dependencies for Playwright (minimal set)
+# Install runtime dependencies for Playwright (minimal set) and git for GitPython
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
@@ -45,16 +45,17 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
+    git \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Copy the virtual environment from builder
 COPY --from=builder /venv /venv
 
-# Install Playwright browsers
+# Install Playwright browsers (commented out due to network issues - not required for GitHub integration)
 ENV PATH=/venv/bin:$PATH
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN playwright install chromium
+# RUN playwright install chromium
 
 # Copy server code and tests
 COPY src/server/ src/server/

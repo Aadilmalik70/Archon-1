@@ -1,0 +1,327 @@
+{
+	"info": {
+		"_postman_id": "github-integration-archon",
+		"name": "Archon - GitHub Integration",
+		"description": "Complete API collection for Archon GitHub integration endpoints",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "1. Setup - Save GitHub Token",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"key\": \"GITHUB_TOKEN\",\n  \"value\": \"ghp_your_github_personal_access_token_here\"\n}"
+				},
+				"url": {
+					"raw": "http://localhost:8181/api/credentials",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"credentials"
+					]
+				},
+				"description": "Save GitHub Personal Access Token to Archon settings. Replace 'ghp_your_github_personal_access_token_here' with your actual GitHub PAT."
+			},
+			"response": []
+		},
+		{
+			"name": "2. Validate GitHub Token",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"token\": \"ghp_your_github_personal_access_token_here\"\n}"
+				},
+				"url": {
+					"raw": "http://localhost:8181/api/github/validate-token",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"github",
+						"validate-token"
+					]
+				},
+				"description": "Validate a GitHub token and get user info and rate limits"
+			},
+			"response": []
+		},
+		{
+			"name": "3. List Repository Branches",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8181/api/github/repository/owner/repo/branches",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"github",
+						"repository",
+						"owner",
+						"repo",
+						"branches"
+					]
+				},
+				"description": "List all branches in a repository. Replace 'owner' and 'repo' with actual values (e.g., facebook/react)"
+			},
+			"response": []
+		},
+		{
+			"name": "4. Link GitHub Repo to Project",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"repo_url\": \"https://github.com/owner/repo\",\n  \"branch\": \"main\",\n  \"include_patterns\": [\n    \"src/**/*.ts\",\n    \"src/**/*.tsx\"\n  ],\n  \"exclude_patterns\": [\n    \"**/test/**\",\n    \"**/*.test.ts\"\n  ],\n  \"knowledge_type\": \"documentation\",\n  \"tags\": [\"frontend\", \"typescript\"],\n  \"extract_code_examples\": true\n}"
+				},
+				"url": {
+					"raw": "http://localhost:8181/api/projects/:project_id/github/link",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"projects",
+						":project_id",
+						"github",
+						"link"
+					],
+					"variable": [
+						{
+							"key": "project_id",
+							"value": "your-project-uuid-here",
+							"description": "UUID of the project"
+						}
+					]
+				},
+				"description": "Clone and index a GitHub repository, linking it to a project. This starts an async operation - use the returned operation_id to track progress."
+			},
+			"response": []
+		},
+		{
+			"name": "5. Get Linked GitHub Sources",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8181/api/projects/:project_id/github/sources",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"projects",
+						":project_id",
+						"github",
+						"sources"
+					],
+					"variable": [
+						{
+							"key": "project_id",
+							"value": "your-project-uuid-here",
+							"description": "UUID of the project"
+						}
+					]
+				},
+				"description": "Get all GitHub repositories linked to a project"
+			},
+			"response": []
+		},
+		{
+			"name": "6. Get GitHub Operation Progress",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8181/api/progress/:operation_id",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"progress",
+						":operation_id"
+					],
+					"variable": [
+						{
+							"key": "operation_id",
+							"value": "operation-uuid-from-link-response",
+							"description": "Operation ID returned from link endpoint"
+						}
+					]
+				},
+				"description": "Track progress of GitHub clone/index operation. Poll this endpoint to monitor status."
+			},
+			"response": []
+		},
+		{
+			"name": "7. Unlink GitHub Repository",
+			"request": {
+				"method": "DELETE",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8181/api/projects/:project_id/github/:source_id",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"projects",
+						":project_id",
+						"github",
+						":source_id"
+					],
+					"variable": [
+						{
+							"key": "project_id",
+							"value": "your-project-uuid-here",
+							"description": "UUID of the project"
+						},
+						{
+							"key": "source_id",
+							"value": "source-uuid-here",
+							"description": "UUID of the source to unlink"
+						}
+					]
+				},
+				"description": "Unlink a GitHub repository from a project and delete all associated data (chunks, code examples)"
+			},
+			"response": []
+		},
+		{
+			"name": "Supporting - Create Project",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"name\": \"My Test Project\",\n  \"description\": \"Testing GitHub integration\"\n}"
+				},
+				"url": {
+					"raw": "http://localhost:8181/api/projects",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"projects"
+					]
+				},
+				"description": "Create a new project to test GitHub integration with"
+			},
+			"response": []
+		},
+		{
+			"name": "Supporting - List All Projects",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8181/api/projects",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"projects"
+					]
+				},
+				"description": "List all projects to get project IDs"
+			},
+			"response": []
+		},
+		{
+			"name": "Supporting - Get Active Operations",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8181/api/progress/active",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8181",
+					"path": [
+						"api",
+						"progress",
+						"active"
+					]
+				},
+				"description": "Get all active operations (useful for finding operation_id if you lost it)"
+			},
+			"response": []
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8181",
+			"type": "string"
+		},
+		{
+			"key": "project_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "source_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "operation_id",
+			"value": "",
+			"type": "string"
+		}
+	]
+}

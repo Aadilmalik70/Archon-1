@@ -1276,3 +1276,323 @@ async def restore_project_version(
             f"Failed to restore version | error={str(e)} | project_id={project_id} | field_name={field_name} | version_number={version_number}"
         )
         raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+# =====================================================
+# GitHub Integration Endpoints
+# =====================================================
+
+
+class LinkGitHubRepoRequest(BaseModel):
+    repo_url: str
+    branch: str | None = "main"
+    include_patterns: list[str] | None = None
+    exclude_patterns: list[str] | None = None
+    knowledge_type: str | None = "documentation"
+    tags: list[str] | None = None
+    extract_code_examples: bool | None = True
+
+
+class ValidateGitHubTokenRequest(BaseModel):
+    token: str
+
+
+@router.post("/projects/{project_id}/github/link")
+async def link_github_repository(project_id: str, request: LinkGitHubRepoRequest):
+    """
+    Link a GitHub repository to a project and start indexing.
+    Returns progress_id for tracking the indexing operation.
+    """
+    try:
+        logfire.info(f"Linking GitHub repo to project | project_id={project_id} | repo_url={request.repo_url}")
+
+        # Get GitHub token from settings
+        from ..services.credential_service import credential_service
+
+        github_token = await credential_service.get_credential("GITHUB_TOKEN")
+        if not github_token:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "GitHub token not configured. Please add your Personal Access Token in Settings."}
+            )
+
+        # Generate unique progress ID and source ID
+        import uuid
+        progress_id = str(uuid.uuid4())
+        source_id = f"github_{uuid.uuid4().hex[:12]}"
+
+        # Initialize progress tracker
+        from ..utils.progress.progress_tracker import ProgressTracker
+        tracker = ProgressTracker(progress_id, operation_type="github_clone")
+        await tracker.start({
+            "repo_url": request.repo_url,
+            "branch": request.branch or "main",
+            "status": "initializing",
+            "progress": 0,
+            "log": f"Starting GitHub repository indexing for {request.repo_url}"
+        })
+
+        # Start background task for cloning and indexing
+        import asyncio
+        asyncio.create_task(
+            _perform_github_clone_with_progress(
+                progress_id=progress_id,
+                source_id=source_id,
+                project_id=project_id,
+                repo_url=request.repo_url,
+                branch=request.branch or "main",
+                include_patterns=request.include_patterns,
+                exclude_patterns=request.exclude_patterns,
+                knowledge_type=request.knowledge_type or "documentation",
+                tags=request.tags or [],
+                extract_code_examples=request.extract_code_examples if request.extract_code_examples is not None else True,
+                github_token=github_token,
+                tracker=tracker
+            )
+        )
+
+        logfire.info(f"GitHub clone started | progress_id={progress_id} | source_id={source_id}")
+
+        return {
+            "success": True,
+            "progressId": progress_id,
+            "sourceId": source_id,
+            "message": "GitHub repository indexing started"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to link GitHub repository | error={str(e)} | project_id={project_id}")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+async def _perform_github_clone_with_progress(
+    progress_id: str,
+    source_id: str,
+    project_id: str,
+    repo_url: str,
+    branch: str,
+    include_patterns: list[str] | None,
+    exclude_patterns: list[str] | None,
+    knowledge_type: str,
+    tags: list[str],
+    extract_code_examples: bool,
+    github_token: str,
+    tracker: Any
+):
+    """Perform GitHub clone and indexing with progress tracking."""
+    from ..services.github import GitHubService, GitHubStorageService
+
+    github_service = GitHubService(github_token)
+    storage_service = GitHubStorageService()
+
+    clone_path = None
+
+    try:
+        # Progress callback for tracking
+        async def progress_callback(message: str, percentage: int, batch_info: dict = None):
+            await tracker.update(
+                status="processing" if percentage < 70 else "indexing",
+                progress=percentage,
+                log=message,
+                **(batch_info or {})
+            )
+
+        # Clone repository
+        success, clone_result = await github_service.clone_repository(
+            repo_url=repo_url,
+            branch=branch,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            progress_callback=progress_callback
+        )
+
+        if not success:
+            await tracker.error(clone_result.get("error", "Failed to clone repository"))
+            return
+
+        clone_path = clone_result["clone_path"]
+        files = clone_result["files"]
+        repo_info = {
+            "owner": clone_result["owner"],
+            "repo_name": clone_result["repo_name"],
+            "branch": clone_result["branch"],
+            "clone_path": clone_path,
+            "total_size": clone_result["total_size"]
+        }
+
+        # Index repository files
+        success, index_result = await storage_service.index_repository(
+            source_id=source_id,
+            repo_info=repo_info,
+            files=files,
+            knowledge_type=knowledge_type,
+            tags=tags,
+            extract_code_examples=extract_code_examples,
+            progress_callback=progress_callback
+        )
+
+        if not success:
+            await tracker.error(index_result.get("error", "Failed to index repository"))
+            return
+
+        # Link source to project
+        from ..services.projects import SourceLinkingService
+        link_service = SourceLinkingService()
+        link_service.link_source_to_project(project_id, source_id)
+
+        # Complete with results
+        await tracker.complete({
+            "log": "GitHub repository indexed successfully",
+            "sourceId": source_id,
+            "filesProcessed": index_result["files_processed"],
+            "chunksStored": index_result["chunks_stored"],
+            "codeExamplesStored": index_result["code_examples_stored"],
+            "repository": f"{repo_info['owner']}/{repo_info['repo_name']}",
+            "branch": branch
+        })
+
+        logfire.info(
+            f"GitHub repo indexed successfully | progress_id={progress_id} | "
+            f"source_id={source_id} | files={index_result['files_processed']}"
+        )
+
+    except Exception as e:
+        error_msg = f"GitHub clone failed: {str(e)}"
+        logfire.error(f"{error_msg} | progress_id={progress_id}", exc_info=True)
+        await tracker.error(error_msg)
+
+    finally:
+        # Cleanup cloned repository
+        if clone_path:
+            github_service.cleanup_clone(clone_path)
+
+
+@router.get("/projects/{project_id}/github/sources")
+async def get_project_github_sources(project_id: str):
+    """Get all GitHub sources linked to a project."""
+    try:
+        logfire.info(f"Getting GitHub sources for project | project_id={project_id}")
+
+        # Get linked sources with full details
+        from ..services.projects import SourceLinkingService
+        link_service = SourceLinkingService()
+        success, result = link_service.get_project_sources_with_details(project_id)
+
+        if not success:
+            raise HTTPException(status_code=500, detail=result)
+
+        # Filter for GitHub sources only
+        github_sources = [
+            source for source in result.get("sources", [])
+            if source.get("metadata", {}).get("source_type") == "github_repo"
+        ]
+
+        logfire.info(f"Found {len(github_sources)} GitHub sources for project {project_id}")
+
+        return {
+            "success": True,
+            "sources": github_sources,
+            "total": len(github_sources)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to get GitHub sources | error={str(e)} | project_id={project_id}")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.delete("/projects/{project_id}/github/{source_id}")
+async def unlink_github_repository(project_id: str, source_id: str):
+    """Unlink and optionally delete a GitHub repository from a project."""
+    try:
+        logfire.info(f"Unlinking GitHub repo | project_id={project_id} | source_id={source_id}")
+
+        # Unlink source from project
+        from ..services.projects import SourceLinkingService
+        link_service = SourceLinkingService()
+        success, result = link_service.unlink_source_from_project(project_id, source_id)
+
+        if not success:
+            raise HTTPException(status_code=500, detail=result)
+
+        # Delete the source (this will cascade delete documents and code examples)
+        from ..services.github import GitHubStorageService
+        storage_service = GitHubStorageService()
+        delete_success, delete_result = await storage_service.unlink_repository(source_id)
+
+        if not delete_success:
+            logfire.warning(f"Failed to delete source after unlinking | source_id={source_id}")
+
+        logfire.info(f"GitHub repo unlinked successfully | project_id={project_id} | source_id={source_id}")
+
+        return {
+            "success": True,
+            "message": f"GitHub repository unlinked from project {project_id}"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to unlink GitHub repo | error={str(e)} | project_id={project_id}")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.post("/github/validate-token")
+async def validate_github_token(request: ValidateGitHubTokenRequest):
+    """Validate a GitHub Personal Access Token."""
+    try:
+        logfire.info("Validating GitHub token")
+
+        from ..services.github import GitHubService
+        github_service = GitHubService()
+
+        is_valid, result = await github_service.validate_token(request.token)
+
+        if is_valid:
+            logfire.info(f"GitHub token validated successfully for user: {result.get('user')}")
+        else:
+            logfire.warning("GitHub token validation failed")
+
+        return result
+
+    except Exception as e:
+        logfire.error(f"Failed to validate GitHub token | error={str(e)}")
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.get("/github/repository/{owner}/{repo}/branches")
+async def list_repository_branches(owner: str, repo: str):
+    """List all branches in a GitHub repository."""
+    try:
+        logfire.info(f"Listing branches for {owner}/{repo}")
+
+        # Get GitHub token from settings
+        from ..services.credential_service import credential_service
+        github_token = await credential_service.get_credential("GITHUB_TOKEN")
+
+        if not github_token:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "GitHub token not configured"}
+            )
+
+        from ..services.github import GitHubService
+        github_service = GitHubService(github_token)
+
+        repo_url = f"https://github.com/{owner}/{repo}"
+        success, result = await github_service.list_branches(repo_url)
+
+        if not success:
+            raise HTTPException(status_code=500, detail=result)
+
+        logfire.info(f"Listed {result['total']} branches for {owner}/{repo}")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to list branches | error={str(e)} | owner={owner} | repo={repo}")
+        raise HTTPException(status_code=500, detail={"error": str(e)})

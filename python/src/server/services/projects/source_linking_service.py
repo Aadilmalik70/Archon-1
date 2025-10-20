@@ -24,7 +24,7 @@ class SourceLinkingService:
 
     def get_project_sources(self, project_id: str) -> tuple[bool, dict[str, list[str]]]:
         """
-        Get all linked sources for a project, separated by type.
+        Get all linked sources for a project, separated by type (legacy format).
 
         Returns:
             Tuple of (success, {"technical_sources": [...], "business_sources": [...]})
@@ -57,6 +57,94 @@ class SourceLinkingService:
                 "technical_sources": [],
                 "business_sources": [],
             }
+
+    def get_project_sources_with_details(self, project_id: str) -> tuple[bool, dict]:
+        """
+        Get all linked sources for a project with full source details.
+
+        Returns:
+            Tuple of (success, {"sources": [...]})
+        """
+        try:
+            # Get all source links for this project
+            response = (
+                self.supabase_client.table("archon_project_sources")
+                .select("source_id, notes")
+                .eq("project_id", project_id)
+                .execute()
+            )
+
+            if not response.data:
+                return True, {"sources": []}
+
+            # Get source IDs
+            source_ids = [link["source_id"] for link in response.data]
+
+            # Fetch full source details from archon_sources table
+            sources_response = (
+                self.supabase_client.table("archon_sources")
+                .select("*")
+                .in_("source_id", source_ids)
+                .execute()
+            )
+
+            return True, {"sources": sources_response.data}
+
+        except Exception as e:
+            logger.error(f"Error getting project sources: {e}")
+            logger.warning(f"Failed to get sources for project {project_id}")
+            return False, {
+                "error": f"Failed to retrieve linked sources: {str(e)}",
+                "sources": [],
+            }
+
+    def link_source_to_project(self, project_id: str, source_id: str, notes: str = None) -> tuple[bool, dict[str, Any]]:
+        """
+        Link a single source to a project.
+
+        Args:
+            project_id: Project UUID
+            source_id: Source ID
+            notes: Optional notes (e.g., "technical", "business")
+
+        Returns:
+            Tuple of (success, result_dict)
+        """
+        try:
+            data = {
+                "project_id": project_id,
+                "source_id": source_id
+            }
+            if notes:
+                data["notes"] = notes
+
+            self.supabase_client.table("archon_project_sources").insert(data).execute()
+            logger.info(f"Linked source {source_id} to project {project_id}")
+            return True, {"message": "Source linked successfully"}
+        except Exception as e:
+            logger.error(f"Failed to link source to project: {e}")
+            return False, {"error": str(e)}
+
+    def unlink_source_from_project(self, project_id: str, source_id: str) -> tuple[bool, dict[str, Any]]:
+        """
+        Unlink a source from a project.
+
+        Args:
+            project_id: Project UUID
+            source_id: Source ID
+
+        Returns:
+            Tuple of (success, result_dict)
+        """
+        try:
+            self.supabase_client.table("archon_project_sources").delete().eq(
+                "project_id", project_id
+            ).eq("source_id", source_id).execute()
+            logger.info(f"Unlinked source {source_id} from project {project_id}")
+            return True, {"message": "Source unlinked successfully"}
+        except Exception as e:
+            logger.error(f"Failed to unlink source from project: {e}")
+            return False, {"error": str(e)}
 
     def update_project_sources(
         self,
