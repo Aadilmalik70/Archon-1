@@ -96,7 +96,7 @@ class SlackClient:
 
                 logger.info(
                     f"Posted message to {channel}",
-                    extra={"ts": data.get("ts"), "thread": bool(thread_ts)},
+                    extra={"ts": data.get("ts"), "is_thread_reply": bool(thread_ts)},
                 )
 
                 return data

@@ -23,6 +23,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install runtime dependencies for Playwright (minimal set) and git for GitPython
+# Also install Node.js for Claude Code CLI
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
@@ -46,8 +47,17 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     xdg-utils \
     git \
+    curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Install Claude Code CLI globally
+# Note: If this package doesn't exist, we'll need to use Anthropic API directly
+RUN npm install -g @anthropic-ai/claude-code || \
+    npm install -g claude-code || \
+    echo "⚠️ Claude Code CLI not available via npm"
 
 # Copy the virtual environment from builder
 COPY --from=builder /venv /venv
@@ -57,8 +67,9 @@ ENV PATH=/venv/bin:$PATH
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 # RUN playwright install chromium
 
-# Copy server code and tests
+# Copy server code, agents, and tests
 COPY src/server/ src/server/
+COPY src/agents/ src/agents/
 COPY src/__init__.py src/
 COPY tests/ tests/
 

@@ -8,6 +8,7 @@ Handles incoming Slack webhooks including:
 - Webhook signature verification
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -342,8 +343,9 @@ class SlackCommandHandler:
                 "text": f"❌ Unknown subcommand: {subcommand}\nUse `/aipm help` for available commands.",
             }
 
-    @staticmethod
+    @classmethod
     async def _handle_create_command(
+        cls,
         args: str, channel_id: str, user_id: str
     ) -> dict[str, Any]:
         """
@@ -397,9 +399,15 @@ class SlackCommandHandler:
                 "text": f"🤖 Creating tasks for: *{description}*\n\nThe AI-PM is analyzing your request...",
             }
 
-            # TODO: Trigger orchestrator agent asynchronously
-            # This would call OrchestratorAgent.analyze_feature(description, project_id)
-            # and create tasks in the database
+            # Trigger orchestrator agent asynchronously
+            asyncio.create_task(
+                cls._execute_feature_planning(
+                    project_id=project_id,
+                    description=description,
+                    channel_id=channel_id,
+                    user_id=user_id,
+                )
+            )
 
             logger.info(
                 f"Feature creation requested: {description}",
@@ -511,6 +519,280 @@ _Note: This channel must be linked to an Archon project to use these commands._
             "response_type": "ephemeral",
             "text": help_text,
         }
+
+    @classmethod
+    async def _execute_feature_planning(
+        cls,
+        project_id: str,
+        description: str,
+        channel_id: str,
+        user_id: str,
+    ) -> None:
+        """
+        Execute feature planning workflow asynchronously.
+
+        This method runs in the background after returning the initial Slack response.
+
+        Args:
+            project_id: Project ID
+            description: Feature description
+            channel_id: Slack channel ID
+            user_id: Slack user ID who triggered the command
+        """
+        try:
+            logger.info(f"Starting feature planning for project {project_id}")
+
+            # Get project info from database
+            supabase = get_supabase_client()
+            project_result = (
+                supabase.table("archon_projects")
+                .select("*")
+                .eq("id", project_id)
+                .single()
+                .execute()
+            )
+
+            if not project_result.data:
+                logger.error(f"Project not found: {project_id}")
+                await cls._send_error_message(
+                    channel_id,
+                    "❌ Project not found in database"
+                )
+                return
+
+            project = project_result.data
+
+            # Get GitHub context if repository is linked
+            code_context = {}
+            if project.get("github_repo"):
+                try:
+                    from ...services.github.github_context_service import get_repo_context
+
+                    logger.info(f"Extracting GitHub context from {project['github_repo']}")
+                    code_context = await get_repo_context(
+                        repo_url=project["github_repo"],
+                        feature_description=description,
+                        branch=project.get("github_branch", "main"),
+                    )
+                    logger.info(f"GitHub context extracted: {len(code_context.get('relevant_files', []))} relevant files")
+                except Exception as e:
+                    logger.warning(f"Could not extract GitHub context: {str(e)}")
+                    code_context = {"error": str(e)}
+
+            # Call orchestrator agent to plan feature
+            from ....agents.product_manager.orchestrator_agent import plan_feature
+
+            logger.info("Calling orchestrator agent for task breakdown")
+            breakdown = await plan_feature(
+                feature_description=description,
+                project_id=project_id,
+                code_context=code_context,
+            )
+
+            logger.info(f"Orchestrator generated {len(breakdown.subtasks)} tasks")
+
+            # Create tasks in database directly
+            created_tasks = []
+
+            for idx, task in enumerate(breakdown.subtasks):
+                try:
+                    # Build comprehensive description with metadata
+                    full_description = task.description
+
+                    # Add acceptance criteria if present
+                    if task.acceptance_criteria:
+                        full_description += f"\n\n**Acceptance Criteria:**\n"
+                        for criterion in task.acceptance_criteria:
+                            full_description += f"- {criterion}\n"
+
+                    # Add technical notes if present
+                    if task.technical_notes:
+                        full_description += f"\n**Technical Notes:** {task.technical_notes}"
+
+                    # Add files affected if present
+                    if task.files_affected:
+                        full_description += f"\n\n**Files Affected:**\n"
+                        for file in task.files_affected:
+                            full_description += f"- {file}\n"
+
+                    # Add effort estimate
+                    full_description += f"\n**Estimated Effort:** {task.estimated_effort}"
+
+                    # Insert directly into database with correct schema
+                    task_data = {
+                        "project_id": project_id,
+                        "title": task.title,
+                        "description": full_description,
+                        "status": "todo",
+                        "assignee": task.assigned_agent or "User",
+                        "task_order": (idx + 1) * 10,  # Order tasks: 10, 20, 30, etc.
+                        "feature": description[:100],  # Use feature description as feature label
+                        "sources": [],
+                        "code_examples": [],
+                    }
+
+                    result = supabase.table("archon_tasks").insert(task_data).execute()
+
+                    created_tasks.append(task.title)
+                    logger.info(f"Created task: {task.title}")
+
+                except Exception as e:
+                    logger.error(f"Failed to create task '{task.title}': {str(e)}")
+
+            # Send breakdown summary to Slack
+            await cls._send_breakdown_summary(
+                channel_id=channel_id,
+                breakdown=breakdown,
+                project_id=project_id,
+                project_name=project.get("name", "Unnamed Project"),
+                created_count=len(created_tasks),
+            )
+
+            logger.info("Feature planning workflow completed successfully")
+
+            # Auto-trigger execution if enabled
+            auto_execute = os.getenv("AUTO_EXECUTE_TASKS", "false").lower() == "true"
+            if auto_execute and created_tasks:
+                logger.info(f"Auto-execution enabled, triggering feature executor for {len(created_tasks)} tasks")
+
+                # Import feature executor
+                from ....agents.product_manager.feature_executor import execute_feature_async
+
+                # Trigger execution asynchronously (fire-and-forget)
+                asyncio.create_task(
+                    execute_feature_async(
+                        project_id=project_id,
+                        feature_description=description,
+                        max_retries=3,
+                    )
+                )
+
+                logger.info("Feature executor triggered in background")
+            else:
+                logger.info(f"Auto-execution disabled (AUTO_EXECUTE_TASKS={os.getenv('AUTO_EXECUTE_TASKS', 'false')})")
+
+        except Exception as e:
+            logger.error(f"Error in feature planning workflow: {str(e)}", exc_info=True)
+            await cls._send_error_message(
+                channel_id,
+                f"❌ Error during task breakdown: {str(e)}"
+            )
+
+    @staticmethod
+    def _estimate_to_hours(estimate: str) -> float:
+        """Convert effort estimate string to hours."""
+        estimate_map = {
+            "small": 2.0,
+            "medium": 4.0,
+            "large": 8.0,
+        }
+        return estimate_map.get(estimate.lower(), 4.0)
+
+    @staticmethod
+    async def _send_breakdown_summary(
+        channel_id: str,
+        breakdown: Any,
+        project_id: str,
+        project_name: str,
+        created_count: int,
+    ) -> None:
+        """Send task breakdown summary to Slack channel."""
+        try:
+            client = await SlackService.get_client()
+            if not client:
+                logger.error("Slack client not available")
+                return
+
+            # Build summary message
+            total_effort = breakdown.estimated_total_effort
+            task_count = len(breakdown.subtasks)
+            risks_count = len(breakdown.risks) if breakdown.risks else 0
+
+            # Create message blocks
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "🤖 AI-PM Task Breakdown Complete",
+                    }
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {"type": "mrkdwn", "text": f"*Project:*\n{project_name}"},
+                        {"type": "mrkdwn", "text": f"*Tasks Created:*\n{created_count} tasks"},
+                        {"type": "mrkdwn", "text": f"*Total Effort:*\n{total_effort}"},
+                        {"type": "mrkdwn", "text": f"*Risks:*\n{risks_count} identified"},
+                    ]
+                },
+                {"type": "divider"},
+            ]
+
+            # Add tasks list (limit to 10)
+            task_text = "*📋 Tasks:*\n"
+            for i, task in enumerate(breakdown.subtasks[:10], 1):
+                agent_emoji = {
+                    "coding": "⚙️",
+                    "qa": "🧪",
+                    "docs": "📝",
+                    "security": "🔒",
+                    "performance": "⚡",
+                }.get(task.assigned_agent, "📌")
+
+                task_text += f"{i}. {agent_emoji} {task.title} ({task.estimated_effort})\n"
+
+            if len(breakdown.subtasks) > 10:
+                task_text += f"\n_...and {len(breakdown.subtasks) - 10} more tasks_"
+
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": task_text}
+            })
+
+            # Add risks if any
+            if breakdown.risks:
+                risk_text = "*⚠️ Identified Risks:*\n"
+                for risk in breakdown.risks[:5]:
+                    risk_text += f"• {risk}\n"
+
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": risk_text}})
+
+            # Add call-to-action
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "🎯 *Ready for Execution*\n"
+                           "Tasks are now available in the Archon database.\n"
+                           "Claude Code can execute these tasks via MCP:\n"
+                           f"`list_tasks(filter_by=\"project\", filter_value=\"{project_id}\")`"
+                }
+            })
+
+            # Send message
+            await client.post_message(
+                channel=channel_id,
+                text=f"Task breakdown complete: {task_count} tasks created",
+                blocks=blocks,
+            )
+
+        except Exception as e:
+            logger.error(f"Error sending breakdown summary: {str(e)}", exc_info=True)
+
+    @staticmethod
+    async def _send_error_message(channel_id: str, error_text: str) -> None:
+        """Send error message to Slack channel."""
+        try:
+            client = await SlackService.get_client()
+            if client:
+                await client.post_message(
+                    channel=channel_id,
+                    text=error_text,
+                )
+        except Exception as e:
+            logger.error(f"Error sending error message to Slack: {str(e)}")
 
 
 class SlackInteractionHandler:
