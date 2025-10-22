@@ -215,12 +215,11 @@ Begin implementation now.
             logger.debug(f"Created prompt file: {prompt_file}")
             logger.debug(f"Prompt content:\n{prompt}")
 
-            # Build command
-            # Note: Adjust these flags based on your Claude Code CLI version
+            # Build command with non-interactive flags
             cmd = [
                 self.claude_code_path,
-                # "--non-interactive",  # Uncomment if Claude Code supports this
-                # "--prompt-file", prompt_file,  # Uncomment if supported
+                "--print",  # Non-interactive mode: print response and exit
+                "--dangerously-skip-permissions",  # Bypass permission checks for automation
             ]
 
             logger.info(f"Executing command: {' '.join(cmd)}")

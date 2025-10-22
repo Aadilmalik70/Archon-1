@@ -89,8 +89,8 @@ class FeatureExecutor:
 
                 logger.info(f"Processing task {task_num}/{total_tasks}: {task['title']}")
 
-                # Update status to "executing"
-                await self._update_task_status(task["id"], "executing")
+                # Update status to "doing"
+                await self._update_task_status(task["id"], "doing")
 
                 # Send start notification to Slack
                 await self.progress_reporter.notify_task_execution_started(
@@ -264,7 +264,7 @@ class FeatureExecutor:
 
         Args:
             task_id: Task UUID
-            status: New status (todo/executing/review/done)
+            status: New status (todo/doing/review/done)
         """
         try:
             self.supabase.table("archon_tasks").update({"status": status}).eq("id", task_id).execute()

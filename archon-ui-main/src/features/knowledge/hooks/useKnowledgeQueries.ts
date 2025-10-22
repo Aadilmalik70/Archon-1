@@ -21,6 +21,7 @@ import type {
   KnowledgeItemsResponse,
   UploadMetadata,
 } from "../types";
+import type { FolderUploadMetadata, FolderUploadResponse } from "../types/folder-upload";
 import { getProviderErrorMessage } from "../utils/providerErrorHandler";
 
 // Query keys factory for better organization and type safety
@@ -470,6 +471,183 @@ export function useUploadDocument() {
 
       // Display the actual error message from backend
       const message = error instanceof Error ? error.message : "Failed to upload document";
+      showToast(message, "error");
+    },
+  });
+}
+
+/**
+ * Upload folder mutation with optimistic updates
+ */
+export function useFolderUpload() {
+  const queryClient = useQueryClient();
+  const { showToast } = useToast();
+
+  return useMutation<
+    FolderUploadResponse,
+    Error,
+    { files: File[]; metadata: FolderUploadMetadata },
+    {
+      previousSummaries?: Array<[readonly unknown[], KnowledgeItemsResponse | undefined]>;
+      previousOperations?: ActiveOperationsResponse;
+      tempProgressId: string;
+    }
+  >({
+    mutationFn: ({ files, metadata }: { files: File[]; metadata: FolderUploadMetadata }) =>
+      knowledgeService.uploadFolder(files, metadata),
+    onMutate: async ({ files, metadata }) => {
+      // Cancel any outgoing refetches to prevent race conditions
+      await queryClient.cancelQueries({ queryKey: knowledgeKeys.summariesPrefix() });
+      await queryClient.cancelQueries({ queryKey: progressKeys.active() });
+
+      // Snapshot the previous values for rollback
+      const previousSummaries = queryClient.getQueriesData<KnowledgeItemsResponse>({
+        queryKey: knowledgeKeys.summariesPrefix(),
+      });
+      const previousOperations = queryClient.getQueryData<ActiveOperationsResponse>(progressKeys.active());
+
+      const tempProgressId = createOptimisticId();
+
+      // Create optimistic knowledge item for the folder upload
+      const optimisticItem = createOptimisticEntity<KnowledgeItem>({
+        title: `Folder upload (${files.length} files)`,
+        url: `folder://${files.length}-files`,
+        source_id: tempProgressId,
+        source_type: "file",
+        knowledge_type: metadata.knowledge_type || "technical",
+        status: "processing",
+        document_count: files.length,
+        code_examples_count: 0,
+        metadata: {
+          knowledge_type: metadata.knowledge_type || "technical",
+          tags: metadata.tags || [],
+          source_type: "file",
+          status: "processing",
+          description: `Uploading ${files.length} files`,
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Omit<KnowledgeItem, "id">);
+
+      // Respect each cache's filter (knowledge_type, tags, etc.)
+      const entries = queryClient.getQueriesData<KnowledgeItemsResponse>({
+        queryKey: knowledgeKeys.summariesPrefix(),
+      });
+      for (const [qk, old] of entries) {
+        const filter = qk[qk.length - 1] as KnowledgeItemsFilter | undefined;
+        const matchesType = !filter?.knowledge_type || optimisticItem.knowledge_type === filter.knowledge_type;
+        const matchesTags =
+          !filter?.tags || filter.tags.every((t) => (optimisticItem.metadata?.tags ?? []).includes(t));
+        if (!(matchesType && matchesTags)) continue;
+        if (!old) {
+          queryClient.setQueryData<KnowledgeItemsResponse>(qk, {
+            items: [optimisticItem],
+            total: 1,
+            page: 1,
+            per_page: 100,
+          });
+        } else {
+          queryClient.setQueryData<KnowledgeItemsResponse>(qk, {
+            ...old,
+            items: [optimisticItem, ...old.items],
+            total: (old.total ?? old.items.length) + 1,
+          });
+        }
+      }
+
+      // Create optimistic progress operation for folder upload
+      const optimisticOperation: ActiveOperation = {
+        operation_id: tempProgressId,
+        operation_type: "folder_upload",
+        status: "starting",
+        progress: 0,
+        message: `Uploading folder with ${files.length} files`,
+        started_at: new Date().toISOString(),
+        progressId: tempProgressId,
+        type: "folder_upload",
+        url: `folder://${files.length}-files`,
+        source_id: tempProgressId,
+      };
+
+      // Add optimistic operation to active operations
+      queryClient.setQueryData<ActiveOperationsResponse>(progressKeys.active(), (old) => {
+        if (!old) {
+          return {
+            operations: [optimisticOperation],
+            count: 1,
+            timestamp: new Date().toISOString(),
+          };
+        }
+        return {
+          ...old,
+          operations: [optimisticOperation, ...old.operations],
+          count: old.count + 1,
+        };
+      });
+
+      return { previousSummaries, previousOperations, tempProgressId };
+    },
+    onSuccess: (response, _variables, context) => {
+      // Replace temporary IDs with real ones from the server
+      if (context && response?.progressId) {
+        // Update summaries cache with real progress ID
+        queryClient.setQueriesData<KnowledgeItemsResponse>({ queryKey: knowledgeKeys.summariesPrefix() }, (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            items: old.items.map((item) => {
+              if (item.source_id === context.tempProgressId) {
+                return {
+                  ...item,
+                  source_id: response.progressId,
+                };
+              }
+              return item;
+            }),
+          };
+        });
+
+        // Update progress operation with real progress ID
+        queryClient.setQueryData<ActiveOperationsResponse>(progressKeys.active(), (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            operations: old.operations.map((op) => {
+              if (op.operation_id === context.tempProgressId) {
+                return {
+                  ...op,
+                  operation_id: response.progressId,
+                  progressId: response.progressId,
+                  source_id: response.progressId,
+                  message: response.message || op.message,
+                };
+              }
+              return op;
+            }),
+          };
+        });
+      }
+
+      // Only invalidate progress to start tracking the new operation
+      // The lists/summaries will refresh automatically via polling when operations are active
+      queryClient.invalidateQueries({ queryKey: progressKeys.active() });
+
+      // Don't show success here - upload is just starting in background
+      // Success/failure will be shown via progress polling
+    },
+    onError: (error, _variables, context) => {
+      // Rollback optimistic updates on error
+      if (context?.previousSummaries) {
+        for (const [queryKey, data] of context.previousSummaries) {
+          queryClient.setQueryData(queryKey, data);
+        }
+      }
+      if (context?.previousOperations) {
+        queryClient.setQueryData(progressKeys.active(), context.previousOperations);
+      }
+
+      // Display the actual error message from backend
+      const message = error instanceof Error ? error.message : "Failed to upload folder";
       showToast(message, "error");
     },
   });

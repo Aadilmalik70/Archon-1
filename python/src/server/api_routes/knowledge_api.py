@@ -19,9 +19,9 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 # Basic validation - simplified inline version
-
 # Import unified logging
 from ..config.logfire_config import get_logger, safe_logfire_error, safe_logfire_info
+from ..models.folder_upload_models import FolderUploadResponse
 from ..services.crawler_manager import get_crawler
 from ..services.crawling import CrawlingService
 from ..services.credential_service import credential_service
@@ -62,7 +62,7 @@ active_crawl_tasks: dict[str, asyncio.Task] = {}
 async def _validate_provider_api_key(provider: str = None) -> None:
     """Validate LLM provider API key before starting operations."""
     logger.info("🔑 Starting API key validation...")
-    
+
     try:
         # Basic provider validation
         if not provider:
@@ -117,7 +117,7 @@ async def _validate_provider_api_key(provider: str = None) -> None:
                     "provider": provider,
                 },
             )
-            
+
         logger.info(f"✅ {provider.title()} API key validation successful")
 
     except HTTPException:
@@ -129,7 +129,7 @@ async def _validate_provider_api_key(provider: str = None) -> None:
         error_str = str(e)
         sanitized_error = ProviderErrorFactory.sanitize_provider_error(error_str, provider or "openai")
         logger.error(f"❌ Caught exception during API key validation: {sanitized_error}")
-        
+
         # Always fail for any exception during validation - better safe than sorry
         logger.error("🚨 API key validation failed - blocking crawl operation")
         raise HTTPException(
@@ -612,14 +612,14 @@ async def get_knowledge_item_code_examples(
 @router.post("/knowledge-items/{source_id}/refresh")
 async def refresh_knowledge_item(source_id: str):
     """Refresh a knowledge item by re-crawling its URL with the same metadata."""
-    
+
     # Validate API key before starting expensive refresh operation
     logger.info("🔍 About to validate API key for refresh...")
     provider_config = await credential_service.get_active_provider("embedding")
     provider = provider_config.get("provider", "openai")
     await _validate_provider_api_key(provider)
     logger.info("✅ API key validation completed successfully for refresh")
-    
+
     try:
         safe_logfire_info(f"Starting knowledge item refresh | source_id={source_id}")
 
@@ -899,14 +899,14 @@ async def upload_document(
     extract_code_examples: bool = Form(True),
 ):
     """Upload and process a document with progress tracking."""
-    
-    # Validate API key before starting expensive upload operation  
+
+    # Validate API key before starting expensive upload operation
     logger.info("🔍 About to validate API key for upload...")
     provider_config = await credential_service.get_active_provider("embedding")
     provider = provider_config.get("provider", "openai")
     await _validate_provider_api_key(provider)
     logger.info("✅ API key validation completed successfully for upload")
-    
+
     try:
         # DETAILED LOGGING: Track knowledge_type parameter flow
         safe_logfire_info(
@@ -1090,6 +1090,259 @@ async def _perform_upload_with_progress(
         if progress_id in active_crawl_tasks:
             del active_crawl_tasks[progress_id]
             safe_logfire_info(f"Cleaned up upload task from registry | progress_id={progress_id}")
+
+
+@router.post("/documents/upload-folder")
+async def upload_folder_batch(
+    files: list[UploadFile] = File(...),
+    metadata: str = Form(...),
+):
+    """Upload multiple documents from a folder with progress tracking."""
+
+    # Validate API key before starting expensive upload operation
+    logger.info("🔍 About to validate API key for folder upload...")
+    provider_config = await credential_service.get_active_provider("embedding")
+    provider = provider_config.get("provider", "openai")
+    await _validate_provider_api_key(provider)
+    logger.info("✅ API key validation completed successfully for folder upload")
+
+    try:
+        # Parse metadata JSON
+        try:
+            metadata_dict = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=422, detail={"error": "Invalid metadata JSON"})
+
+        # VALIDATION: Limit file count to prevent memory issues
+        MAX_FILES_PER_UPLOAD = 500
+        if len(files) > MAX_FILES_PER_UPLOAD:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": f"Too many files. Maximum {MAX_FILES_PER_UPLOAD} files per upload. You submitted {len(files)} files. Please upload in smaller batches."
+                }
+            )
+
+        safe_logfire_info(
+            f"📁 FOLDER UPLOAD: Starting folder upload | files={len(files)} | knowledge_type={metadata_dict.get('knowledge_type', 'technical')}"
+        )
+
+        # CRITICAL: Read ALL file contents immediately before background task
+        # UploadFile.file closes after endpoint returns
+        file_contents_list = []
+        for upload_file in files:
+            content = await upload_file.read()
+            file_contents_list.append(
+                {
+                    "content": content,
+                    "filename": upload_file.filename,
+                    "content_type": upload_file.content_type,
+                    "relative_path": upload_file.filename,  # Browser sends filename with path
+                }
+            )
+
+        # Generate progress ID
+        progress_id = str(uuid.uuid4())
+
+        # Initialize progress tracker
+        from ..utils.progress.progress_tracker import ProgressTracker
+
+        tracker = ProgressTracker(progress_id, operation_type="folder_upload")
+        await tracker.start(
+            {
+                "total_files": len(files),
+                "processed_files": 0,
+                "status": "initializing",
+                "progress": 0,
+                "log": f"Starting folder upload with {len(files)} files",
+            }
+        )
+
+        # Start background task
+        folder_upload_task = asyncio.create_task(
+            _perform_folder_upload_with_progress(progress_id, file_contents_list, metadata_dict, tracker)
+        )
+        active_crawl_tasks[progress_id] = folder_upload_task
+
+        safe_logfire_info(f"Folder upload started successfully | progress_id={progress_id} | files={len(files)}")
+
+        return FolderUploadResponse(
+            success=True,
+            progress_id=progress_id,
+            message="Folder upload started",
+            total_files=len(files),
+        ).model_dump(by_alias=True)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        safe_logfire_error(
+            f"Failed to start folder upload | error={str(e)} | error_type={type(e).__name__}"
+        )
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+async def _perform_folder_upload_with_progress(
+    progress_id: str,
+    file_contents_list: list[dict],
+    metadata_dict: dict,
+    tracker: "ProgressTracker",
+):
+    """Process folder upload with per-file error isolation."""
+
+    # Create cancellation check function
+    def check_cancellation():
+        """Check if folder upload task has been cancelled."""
+        task = active_crawl_tasks.get(progress_id)
+        if task and task.cancelled():
+            raise asyncio.CancelledError("Folder upload was cancelled by user")
+
+    total_files = len(file_contents_list)
+    file_results = []
+    successful = 0
+    failed = 0
+    skipped = 0
+
+    try:
+        for idx, file_data in enumerate(file_contents_list):
+            try:
+                # Check cancellation before processing each file
+                check_cancellation()
+
+                filename = file_data["filename"]
+                content_type = file_data["content_type"]
+
+                # Update progress for current file
+                current_progress = int((idx / total_files) * 100)
+                await tracker.update(
+                    status="processing",
+                    progress=current_progress,
+                    processed_files=idx,
+                    current_file=filename,
+                    log=f"Processing {filename} ({idx+1}/{total_files})",
+                )
+
+                # CRITICAL: Extract text (may raise ValueError for binary/empty files)
+                try:
+                    extracted_text = extract_text_from_document(
+                        file_data["content"], filename, content_type
+                    )
+                except ValueError as e:
+                    # User error (unsupported format or empty file)
+                    file_results.append(
+                        {
+                            "filename": filename,
+                            "relative_path": file_data.get("relative_path", filename),
+                            "status": "failed",
+                            "error": str(e),
+                        }
+                    )
+                    failed += 1
+                    continue
+
+                # PROCESS: Use existing DocumentStorageService
+                doc_service = DocumentStorageService(get_supabase_client())
+                source_id = f"file_{filename.replace(' ', '_').replace('.', '_')}_{uuid.uuid4().hex[:8]}"
+
+                # Create per-file progress callback (maps to overall range)
+                async def file_progress_callback(message: str, percentage: int, batch_info: dict = None):
+                    # Map file's 0-100% to this file's overall range
+                    file_start = int((idx / total_files) * 100)
+                    file_end = int(((idx + 1) / total_files) * 100)
+                    mapped = file_start + int((percentage / 100) * (file_end - file_start))
+
+                    await tracker.update(status="processing", progress=mapped, log=message)
+
+                success, result = await doc_service.upload_document(
+                    file_content=extracted_text,
+                    filename=filename,
+                    source_id=source_id,
+                    knowledge_type=metadata_dict.get("knowledge_type", "technical"),
+                    tags=metadata_dict.get("tags", []),
+                    extract_code_examples=metadata_dict.get("extract_code_examples", True),
+                    progress_callback=file_progress_callback,
+                    cancellation_check=check_cancellation,
+                )
+
+                if success:
+                    file_results.append(
+                        {
+                            "filename": filename,
+                            "relative_path": file_data.get("relative_path", filename),
+                            "status": "success",
+                            "source_id": source_id,
+                            "chunks_stored": result.get("chunks_stored", 0),
+                            "code_examples_stored": result.get("code_examples_stored", 0),
+                        }
+                    )
+                    successful += 1
+                else:
+                    file_results.append(
+                        {
+                            "filename": filename,
+                            "relative_path": file_data.get("relative_path", filename),
+                            "status": "failed",
+                            "error": result.get("error", "Unknown error"),
+                        }
+                    )
+                    failed += 1
+
+            except asyncio.CancelledError:
+                # Cancellation - stop processing
+                logger.info(f"Folder upload cancelled at file {idx+1}/{total_files}")
+                raise
+            except Exception as e:
+                # System error - log with full context
+                logger.error(
+                    f"Unexpected error processing {file_data['filename']}: {e}", exc_info=True
+                )
+                file_results.append(
+                    {
+                        "filename": file_data["filename"],
+                        "relative_path": file_data.get("relative_path", file_data["filename"]),
+                        "status": "failed",
+                        "error": f"System error: {str(e)}",
+                    }
+                )
+                failed += 1
+
+        # Complete with summary
+        await tracker.complete(
+            {
+                "log": f"Folder upload complete: {successful} successful, {failed} failed, {skipped} skipped",
+                "total_files": total_files,
+                "processed_files": total_files,
+                "successful_files": successful,
+                "failed_files": failed,
+                "skipped_files": skipped,
+                "file_results": file_results,
+            }
+        )
+
+    except asyncio.CancelledError:
+        # Update progress to cancelled state
+        await tracker.update(
+            status="cancelled",
+            log=f"Folder upload cancelled: {successful} successful, {failed} failed before cancellation",
+            file_results=file_results,
+        )
+    except Exception as e:
+        # Unexpected error during batch processing
+        error_msg = f"Folder upload failed: {str(e)}"
+        logger.error(f"Folder upload error: {e}", exc_info=True)
+        await tracker.error(error_msg)
+    finally:
+        # Clean up task from registry
+        if progress_id in active_crawl_tasks:
+            del active_crawl_tasks[progress_id]
+            safe_logfire_info(f"Cleaned up folder upload task from registry | progress_id={progress_id}")
+
+
+def _is_supported_file_type(filename: str) -> bool:
+    """Check if file type is supported for upload."""
+    supported_extensions = [".pdf", ".docx", ".doc", ".txt", ".md", ".markdown", ".html", ".htm", ".rst"]
+    extension = filename[filename.rfind(".") :].lower() if "." in filename else ""
+    return extension in supported_extensions
 
 
 @router.post("/knowledge-items/search")

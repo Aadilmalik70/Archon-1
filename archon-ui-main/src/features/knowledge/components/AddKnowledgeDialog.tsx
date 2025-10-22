@@ -3,7 +3,7 @@
  * Modal for crawling URLs or uploading documents
  */
 
-import { Globe, Loader2, Upload } from "lucide-react";
+import { FolderOpen, Globe, Loader2, Upload } from "lucide-react";
 import { useId, useState } from "react";
 import { useToast } from "@/features/shared/hooks/useToast";
 import { Button, Input, Label } from "../../ui/primitives";
@@ -15,6 +15,7 @@ import type { CrawlRequest, UploadMetadata } from "../types";
 import { KnowledgeTypeSelector } from "./KnowledgeTypeSelector";
 import { LevelSelector } from "./LevelSelector";
 import { TagInput } from "./TagInput";
+import { FolderUploadTab } from "./FolderUploadTab";
 
 interface AddKnowledgeDialogProps {
   open: boolean;
@@ -29,7 +30,7 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
   onSuccess,
   onCrawlStarted,
 }) => {
-  const [activeTab, setActiveTab] = useState<"crawl" | "upload">("crawl");
+  const [activeTab, setActiveTab] = useState<"crawl" | "upload" | "folder">("crawl");
   const { showToast } = useToast();
   const crawlMutation = useCrawlUrl();
   const uploadMutation = useUploadDocument();
@@ -133,7 +134,7 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
           <DialogDescription>Crawl websites or upload documents to expand your knowledge base.</DialogDescription>
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "crawl" | "upload")}>
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "crawl" | "upload" | "folder")}>
           <div className="flex justify-center">
             <TabsList>
               <TabsTrigger value="crawl" color="blue">
@@ -143,6 +144,10 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
               <TabsTrigger value="upload" color="purple">
                 <Upload className="w-4 h-4 mr-2" />
                 Upload Document
+              </TabsTrigger>
+              <TabsTrigger value="folder" color="orange">
+                <FolderOpen className="w-4 h-4 mr-2" />
+                Upload Folder
               </TabsTrigger>
             </TabsList>
           </div>
@@ -298,6 +303,11 @@ export const AddKnowledgeDialog: React.FC<AddKnowledgeDialogProps> = ({
                 </>
               )}
             </Button>
+          </TabsContent>
+
+          {/* Folder Upload Tab */}
+          <TabsContent value="folder">
+            <FolderUploadTab onSuccess={onSuccess} />
           </TabsContent>
         </Tabs>
       </DialogContent>

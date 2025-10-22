@@ -191,12 +191,43 @@ def extract_text_from_document(file_content: bytes, filename: str, content_type:
                 raise ValueError(f"The file {filename} appears to be empty.")
             return _clean_html_to_text(html_text)
 
-        # Text files (markdown, txt, etc.)
+        # Text files (markdown, txt, code files, etc.)
         elif content_type.startswith("text/") or filename.lower().endswith((
             ".txt",
             ".md",
             ".markdown",
             ".rst",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".py",
+            ".java",
+            ".c",
+            ".cpp",
+            ".h",
+            ".cs",
+            ".go",
+            ".rs",
+            ".php",
+            ".rb",
+            ".swift",
+            ".kt",
+            ".scala",
+            ".sh",
+            ".bash",
+            ".yaml",
+            ".yml",
+            ".json",
+            ".xml",
+            ".css",
+            ".scss",
+            ".sass",
+            ".less",
+            ".sql",
+            ".graphql",
+            ".vue",
+            ".svelte",
         )):
             # Decode text and check if it has content
             text = file_content.decode("utf-8", errors="ignore").strip()
@@ -205,7 +236,14 @@ def extract_text_from_document(file_content: bytes, filename: str, content_type:
             return text
 
         else:
-            raise ValueError(f"Unsupported file format: {content_type} ({filename})")
+            # Try to decode as text for any other file type
+            try:
+                text = file_content.decode("utf-8", errors="ignore").strip()
+                if text and len(text) > 10:  # Has meaningful content
+                    return text
+                raise ValueError(f"The file {filename} appears to be empty or binary.")
+            except Exception:
+                raise ValueError(f"Unsupported file format: {content_type} ({filename})")
 
     except ValueError:
         # Re-raise ValueError with original message for unsupported formats

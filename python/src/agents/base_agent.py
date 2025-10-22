@@ -211,13 +211,13 @@ class BaseAgent(ABC, Generic[DepsT, OutputT]):
             # Add timeout to prevent hanging
             result = await asyncio.wait_for(
                 self._agent.run(user_prompt, deps=deps),
-                timeout=120.0,  # 2 minute timeout for agent operations
+                timeout=300.0,  # 5 minute timeout for agent operations
             )
             self.logger.info(f"Agent {self.name} completed successfully")
             # PydanticAI returns a RunResult with data attribute
             return result.data
         except asyncio.TimeoutError:
-            self.logger.error(f"Agent {self.name} timed out after 120 seconds")
+            self.logger.error(f"Agent {self.name} timed out after 300 seconds")
             raise Exception(f"Agent {self.name} operation timed out - taking too long to respond")
         except Exception as e:
             self.logger.error(f"Agent {self.name} failed: {str(e)}")

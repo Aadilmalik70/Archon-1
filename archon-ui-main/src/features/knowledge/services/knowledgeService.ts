@@ -19,6 +19,7 @@ import type {
   SearchResultsResponse,
   UploadMetadata,
 } from "../types";
+import type { FolderUploadMetadata, FolderUploadResponse } from "../types/folder-upload";
 
 export const knowledgeService = {
   /**
@@ -130,6 +131,43 @@ export const knowledgeService = {
       method: "POST",
       body: formData,
       signal: AbortSignal.timeout(30000), // 30 second timeout for file uploads
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new APIServiceError(err.error || `HTTP ${response.status}`, "HTTP_ERROR", response.status);
+    }
+
+    return response.json();
+  },
+
+  /**
+   * Upload multiple documents from a folder
+   */
+  async uploadFolder(files: File[], metadata: FolderUploadMetadata): Promise<FolderUploadResponse> {
+    const formData = new FormData();
+
+    // Append all files
+    for (const file of files) {
+      formData.append("files", file);
+    }
+
+    // Append metadata as JSON
+    formData.append("metadata", JSON.stringify(metadata));
+
+    // Use fetch directly for file upload (FormData doesn't work well with our ETag wrapper)
+    // In test environment, we need absolute URLs
+    let uploadUrl = "/api/documents/upload-folder";
+    if (typeof process !== "undefined" && process.env?.NODE_ENV === "test") {
+      const testHost = process.env?.VITE_HOST || "localhost";
+      const testPort = process.env?.ARCHON_SERVER_PORT || "8181";
+      uploadUrl = `http://${testHost}:${testPort}${uploadUrl}`;
+    }
+
+    const response = await fetch(uploadUrl, {
+      method: "POST",
+      body: formData,
+      signal: AbortSignal.timeout(60000), // 60 second timeout for batch uploads
     });
 
     if (!response.ok) {
